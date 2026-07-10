@@ -265,8 +265,11 @@ func scanGitHubRepo(ctx context.Context, token, repo, scanType string, deep bool
 	return result
 }
 
-func SetupGitHubScanningRoutes(router *gin.RouterGroup, logger *logrus.Logger) {
+func SetupGitHubScanningRoutes(router *gin.RouterGroup, logger *logrus.Logger, middleware ...gin.HandlerFunc) {
 	ghGroup := router.Group("/github")
+	if len(middleware) > 0 {
+		ghGroup.Use(middleware...)
+	}
 	{
 		ghGroup.POST("/scan", GitHubScanHandler(logger))
 		ghGroup.GET("/repos", GitHubRepoListHandler(logger))

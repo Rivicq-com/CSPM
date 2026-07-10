@@ -3,11 +3,13 @@ package shared
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/pquerna/otp/totp"
 	"github.com/rivic-q/cryptobom-saas/internal/auth"
 	"github.com/sirupsen/logrus"
 )
@@ -26,6 +28,69 @@ type authUserResponse struct {
 	Role  string `json:"role,omitempty"`
 }
 
+// Auth rate limiter: per-IP, per-endpoint
+type authRateLimiter struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
+	window   time.Duration
+	maxReqs  int
+}
+
+func newAuthRateLimiter(maxReqs int, window time.Duration) *authRateLimiter {
+	rl := &authRateLimiter{
+		attempts: make(map[string][]time.Time),
+		window:   window,
+		maxReqs:  maxReqs,
+	}
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *authRateLimiter) allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+	attempts := rl.attempts[key]
+	valid := make([]time.Time, 0, len(attempts))
+	for _, t := range attempts {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	if len(valid) >= rl.maxReqs {
+		rl.attempts[key] = valid
+		return false
+	}
+	rl.attempts[key] = append(valid, now)
+	return true
+}
+
+func (rl *authRateLimiter) cleanup() {
+	ticker := time.NewTicker(rl.window)
+	for range ticker.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-rl.window)
+		for key, attempts := range rl.attempts {
+			valid := make([]time.Time, 0, len(attempts))
+			for _, t := range attempts {
+				if t.After(cutoff) {
+					valid = append(valid, t)
+				}
+			}
+			if len(valid) == 0 {
+				delete(rl.attempts, key)
+			} else {
+				rl.attempts[key] = valid
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+var loginLimiter = newAuthRateLimiter(10, 15*time.Minute) // 10 attempts per 15 min
+var registerLimiter = newAuthRateLimiter(5, 1*time.Hour)   // 5 per hour
+
 // SetupAuthRoutes configures shared JWT auth routes.
 func SetupAuthRoutes(router *gin.RouterGroup, logger *logrus.Logger, service *auth.AuthService, allowedDomains []string, jwtSecret string) {
 	authGroup := router.Group("/auth")
@@ -35,6 +100,7 @@ func SetupAuthRoutes(router *gin.RouterGroup, logger *logrus.Logger, service *au
 		authGroup.POST("/refresh", refreshTokenHandler(service, logger))
 		authGroup.POST("/logout", service.JWTAuthMiddleware(nil), logoutHandler(service, logger))
 		authGroup.POST("/mfa/verify", mfaVerifyHandler(service, logger))
+		authGroup.POST("/mfa/setup", service.JWTAuthMiddleware(nil), mfaSetupHandler(service, logger))
 		authGroup.GET("/me", service.JWTAuthMiddleware(nil), meHandler())
 		authGroup.GET("/editions", editionsHandler(allowedDomains))
 
@@ -115,7 +181,7 @@ func DemoAccessHandler(logger *logrus.Logger, jwtSecret string) gin.HandlerFunc 
 				Email: "demo@cryptobom.io",
 				Role:  "admin",
 			},
-			"edition":  edition,
+			"edition":   edition,
 			"demo_mode": true,
 		})
 	}
@@ -123,6 +189,12 @@ func DemoAccessHandler(logger *logrus.Logger, jwtSecret string) gin.HandlerFunc 
 
 func loginHandler(logger *logrus.Logger, service *auth.AuthService, allowedDomains []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		if !loginLimiter.allow(ip) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many login attempts. Try again later."})
+			return
+		}
+
 		var req authRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
@@ -170,6 +242,12 @@ func loginHandler(logger *logrus.Logger, service *auth.AuthService, allowedDomai
 
 func registerHandler(logger *logrus.Logger, service *auth.AuthService, allowedDomains []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		if !registerLimiter.allow(ip) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many registration attempts. Try again later."})
+			return
+		}
+
 		var req authRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
@@ -201,7 +279,7 @@ func registerHandler(logger *logrus.Logger, service *auth.AuthService, allowedDo
 			logger.WithError(err).WithField("email", req.Email).Warn("registration login failed")
 			c.JSON(http.StatusCreated, gin.H{
 				"message": "Registration completed. Please log in with your new account.",
-				"user": authUserResponse{Email: user.Email, Name: user.Name, Role: user.Role},
+				"user":    authUserResponse{Email: user.Email, Name: user.Name, Role: user.Role},
 			})
 			return
 		}
@@ -295,10 +373,55 @@ func logoutHandler(service *auth.AuthService, logger *logrus.Logger) gin.Handler
 				logger.WithError(err).Warn("logout revocation failed")
 			}
 		}
+		// Clear OAuth cookies
+		c.SetCookie("cbom_access_token", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_refresh_token", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_edition", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_user_id", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_user_name", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_user_email", "", -1, "/", "", false, true)
+		c.SetCookie("cbom_user_role", "", -1, "/", "", false, true)
 		c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 	}
 }
 
+// mfaSetupHandler generates a new TOTP secret and provisioning URI for the user.
+func mfaSetupHandler(service *auth.AuthService, logger *logrus.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString("user_id")
+		user, err := service.GetUserByID(userID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+
+		key, err := totp.Generate(totp.GenerateOpts{
+			Issuer:      "CryptoBOM SaaS",
+			AccountName: user.Email,
+		})
+		if err != nil {
+			logger.WithError(err).Error("Failed to generate TOTP key")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate MFA secret"})
+			return
+		}
+
+		// Store the secret (user must verify before enabling)
+		user.MFASecret = key.Secret()
+		if err := service.UpdateUser(user); err != nil {
+			logger.WithError(err).Error("Failed to store MFA secret")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store MFA secret"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"secret":          key.Secret(),
+			"provisioning_uri": key.URL(),
+			"message":         "Scan the QR code with your authenticator app, then verify with /auth/mfa/verify",
+		})
+	}
+}
+
+// mfaVerifyHandler verifies a TOTP code and completes login.
 func mfaVerifyHandler(service *auth.AuthService, logger *logrus.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
@@ -323,9 +446,13 @@ func mfaVerifyHandler(service *auth.AuthService, logger *logrus.Logger) gin.Hand
 			return
 		}
 
-		// In production, verify TOTP code against user.MFASecret here
-		// For now, we accept any non-empty code for the MFA session
-		if req.MFASession == "" || req.MFACode == "" {
+		if user.MFASecret == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA secret not configured"})
+			return
+		}
+
+		// Validate TOTP code against the user's secret
+		if !totp.Validate(req.MFACode, user.MFASecret) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA code"})
 			return
 		}
@@ -350,6 +477,13 @@ func mfaVerifyHandler(service *auth.AuthService, logger *logrus.Logger) gin.Hand
 			"access_token":  accessToken,
 			"refresh_token": refreshToken,
 			"mfa_verified":  true,
+			"user": authUserResponse{
+				ID:    user.ID,
+				Name:  user.Name,
+				Email: user.Email,
+				Role:  user.Role,
+			},
+			"edition": edition,
 		})
 	}
 }

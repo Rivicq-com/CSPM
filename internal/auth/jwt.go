@@ -271,6 +271,16 @@ func (as *AuthService) GetUserByEmail(email string) (*User, error) {
 	return as.userStore.GetUserByEmail(email)
 }
 
+// GetUserByID exposes the underlying lookup for API handlers.
+func (as *AuthService) GetUserByID(id string) (*User, error) {
+	return as.userStore.GetUserByID(id)
+}
+
+// UpdateUser persists user changes (e.g. MFA secret).
+func (as *AuthService) UpdateUser(user *User) error {
+	return as.userStore.UpdateUser(user)
+}
+
 // Login authenticates a user and returns a LoginResponse.
 func (as *AuthService) Login(email, password string) (*LoginResponse, error) {
 	return as.LoginWithEdition(email, password, "")

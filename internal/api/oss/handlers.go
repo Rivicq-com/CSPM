@@ -33,10 +33,12 @@ func allowedDomainsFromEnv() []string {
 
 // SetupRoutes configures OSS API routes (Open Source edition)
 func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger, cfg *config.OSSConfig) {
-	setupOSSAuth(router, db, logger)
+	authService := setupOSSAuth(router, db, logger)
+	auth := authService.JWTAuthMiddleware(nil)
 
-	// Core CBOM Management (OSS Features)
+	// Core CBOM Management (OSS Features) — protected
 	cbom := router.Group("/cbom")
+	cbom.Use(auth)
 	{
 		cbom.GET("", shared.ListCBOMReports(db, logger))
 		cbom.POST("", shared.CreateCBOMReport(db, logger))
@@ -47,8 +49,9 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		cbom.POST("/:id/attest", attestCBOMReportOSS(db, logger))
 	}
 
-	// Crypto Assets (Basic Discovery)
+	// Crypto Assets (Basic Discovery) — protected
 	assetsGroup := router.Group("/assets")
+	assetsGroup.Use(auth)
 	{
 		assetsGroup.GET("", shared.ListCryptoAssets(db, logger))
 		assetsGroup.GET("/:id", shared.GetCryptoAsset(db, logger))
@@ -56,15 +59,17 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		assetsGroup.GET("/:id/bom", shared.GetAssetBOM(db, logger))
 	}
 
-	// Scan Flow (headleap entry point)
+	// Scan Flow (headleap entry point) — protected
 	scansGroup := router.Group("/scans")
+	scansGroup.Use(auth)
 	{
 		scansGroup.POST("", shared.TriggerCBOMScan(db, logger))
 		scansGroup.GET("/:id", shared.GetCBOMScanStatus(db, logger))
 	}
 
-	// Basic Security Monitoring
+	// Basic Security Monitoring — protected
 	securityGroup := router.Group("/security")
+	securityGroup.Use(auth)
 	{
 		securityGroup.GET("/events", shared.ListSecurityEvents(db, logger))
 		securityGroup.POST("/events", shared.CreateSecurityEvent(db, logger))
@@ -73,16 +78,18 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		securityGroup.POST("/ml-scan", performMLSecurityScanOSS(db, logger))
 	}
 
-	// Dashboard & Analytics (OSS Version)
+	// Dashboard & Analytics (OSS Version) — protected
 	dashboardGroup := router.Group("/dashboard")
+	dashboardGroup.Use(auth)
 	{
 		dashboardGroup.GET("/overview", shared.GetDashboardOverview(db, logger))
 		dashboardGroup.GET("/metrics", shared.GetMetrics(db, logger))
 		dashboardGroup.GET("/compliance", shared.GetComplianceStatus(db, logger))
 	}
 
-	// Kubernetes Integration (Basic)
+	// Kubernetes Integration (Basic) — protected
 	k8sGroup := router.Group("/kubernetes")
+	k8sGroup.Use(auth)
 	{
 		k8sGroup.GET("/clusters", shared.ListKubernetesClusters(db, logger))
 		k8sGroup.POST("/clusters", shared.AddKubernetesCluster(db, logger))
@@ -90,8 +97,9 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		k8sGroup.POST("/clusters/:id/scan", shared.ScanCluster(db, logger, cfg))
 	}
 
-	// Monitoring Tools Integration (Basic)
+	// Monitoring Tools Integration (Basic) — protected
 	monitoringGroup := router.Group("/monitoring")
+	monitoringGroup.Use(auth)
 	{
 		monitoringGroup.GET("/integrations", shared.GetMonitoringIntegrations(db, logger))
 		monitoringGroup.POST("/prometheus", shared.CreatePrometheusIntegration(db, logger))
@@ -99,8 +107,9 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		monitoringGroup.GET("/jaeger", shared.GetJaegerTracing(db, logger))
 	}
 
-	// Cilium Integration (Basic)
+	// Cilium Integration (Basic) — protected
 	ciliumGroup := router.Group("/cilium")
+	ciliumGroup.Use(auth)
 	{
 		ciliumGroup.GET("/flows", shared.GetCiliumCryptoFlows(db, logger))
 		ciliumGroup.GET("/policies", shared.GetCiliumNetworkPolicies(db, logger))
@@ -108,40 +117,42 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 		ciliumGroup.GET("/metrics", shared.GetCiliumMetrics(db, logger))
 	}
 
-	// Metrics Overview for OSS Dashboard
-	router.GET("/metrics/overview", shared.GetMetricsOverview(db, logger))
+	// Metrics Overview for OSS Dashboard — protected
+	router.GET("/metrics/overview", auth, shared.GetMetricsOverview(db, logger))
 
-	// Demo scan endpoint for infrastructure discovery
-	router.GET("/demo/scan", getDemoScanResults(logger))
+	// Demo scan endpoint for infrastructure discovery — protected
+	router.GET("/demo/scan", auth, getDemoScanResults(logger))
 
-	// CSPM (Cryptographic Security Posture Management) - available in both editions
-	router.GET("/cspm/overview", getCSPMOverviewOSS(logger))
+	// CSPM (Cryptographic Security Posture Management) — protected
+	router.GET("/cspm/overview", auth, getCSPMOverviewOSS(logger))
 
-	// RivicQ Ecosystem tools listing
+	// RivicQ Ecosystem tools listing — protected
 	ecosystemGroup := router.Group("/ecosystem")
+	ecosystemGroup.Use(auth)
 	{
 		ecosystemGroup.GET("/tools", getEcosystemTools(logger))
 		ecosystemGroup.GET("/tools/:id", getEcosystemTool(logger))
 		ecosystemGroup.GET("/categories", getEcosystemCategories(logger))
 	}
 
-	// Unified Core Status — connects all OSS tools into a single health endpoint
+	// Unified Core Status — protected
 	coreGroup := router.Group("/core")
+	coreGroup.Use(auth)
 	{
 		coreGroup.GET("/status", getCoreStatus(logger))
 		coreGroup.GET("/services", getCoreServices(logger))
 		coreGroup.GET("/integrations/:name", getCoreIntegrationCheck(logger))
 	}
 
-	// GitHub Scanning (OSS edition — repository crypto scanning)
-	shared.SetupGitHubScanningRoutes(router, logger)
+	// GitHub Scanning (OSS edition) — protected
+	shared.SetupGitHubScanningRoutes(router, logger, auth)
 
-	// Benchmarks (edition-agnostic)
-	router.GET("/benchmarks", getBenchmarksSummaryOSS(db, logger))
+	// Benchmarks (edition-agnostic) — protected
+	router.GET("/benchmarks", auth, getBenchmarksSummaryOSS(db, logger))
 }
 
 // setupOSSAuth configures authentication for OSS edition with database when available
-func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger) {
+func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger) *auth.AuthService {
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	if jwtSecret == "" {
 		jwtSecret = "oss-default-secret-not-for-production"
@@ -268,6 +279,7 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 		logger.Info("OSS registration is open to any email domain unless AUTH_ALLOWED_DOMAINS is set")
 	}
 	shared.SetupAuthRoutes(router, logger, authService, allowedDomains, jwtSecret)
+	return authService
 }
 
 func attestCBOMReportOSS(db *database.DB, logger *logrus.Logger) gin.HandlerFunc {

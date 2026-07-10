@@ -27,12 +27,29 @@ interface AuthContextValue {
 
 const AuthContext = React.createContext<AuthContextValue | undefined>(undefined);
 
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload.exp * 1000 < Date.now();
+  } catch {
+    return true;
+  }
+}
+
 function readStoredAuth() {
   try {
     const token = localStorage.getItem('auth_token');
     const userRaw = localStorage.getItem('auth_user');
     const edition = (localStorage.getItem('app_edition') as Edition | null) || 'oss';
     const user = userRaw ? JSON.parse(userRaw) : null;
+
+    // Check token expiry — clear if expired
+    if (token && isTokenExpired(token)) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
+      return { token: null, user: null, edition };
+    }
+
     return { token, user, edition };
   } catch {
     return { token: null, user: null, edition: 'oss' as Edition };
@@ -111,7 +128,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     completeAuth(response.data);
   }, [completeAuth]);
 
-  const logout = React.useCallback(() => {
+  const logout = React.useCallback(async () => {
+    // Call backend to revoke the token
+    try {
+      await authService.logout();
+    } catch {
+      // Even if the backend call fails, clear local state
+    }
     persist(null, null, edition);
   }, [edition, persist]);
 
@@ -123,7 +146,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     user,
     token,
     edition,
-    isAuthenticated: Boolean(token),
+    isAuthenticated: Boolean(token) && !isTokenExpired(token!),
     loading,
     login,
     register,

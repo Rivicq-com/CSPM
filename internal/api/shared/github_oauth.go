@@ -2,13 +2,13 @@ package shared
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rivic-q/cryptobom-saas/internal/auth"
@@ -30,10 +30,7 @@ type GitHubEmail struct {
 	Verified bool   `json:"verified"`
 }
 
-var (
-	githubOAuthConfig *oauth2.Config
-	githubStateMap    = make(map[string]string)
-)
+var githubOAuthConfig *oauth2.Config
 
 func initGitHubOAuthConfig() *oauth2.Config {
 	if githubOAuthConfig != nil {
@@ -61,6 +58,12 @@ func initGitHubOAuthConfig() *oauth2.Config {
 	return githubOAuthConfig
 }
 
+func randomPassword() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func GitHubLoginHandler(logger *logrus.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		config := initGitHubOAuthConfig()
@@ -73,8 +76,6 @@ func GitHubLoginHandler(logger *logrus.Logger) gin.HandlerFunc {
 		}
 
 		state := generateOAuthState()
-		githubStateMap[state] = time.Now().UTC().Format(time.RFC3339)
-
 		redirectURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline)
 		c.JSON(http.StatusOK, gin.H{
 			"auth_url": redirectURL,
@@ -99,11 +100,10 @@ func GitHubCallbackHandler(logger *logrus.Logger, service *auth.AuthService, all
 			return
 		}
 
-		if _, exists := githubStateMap[state]; !exists {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid state parameter"})
+		if !sharedOAuthState.Validate(state) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid or expired state parameter"})
 			return
 		}
-		delete(githubStateMap, state)
 
 		token, err := config.Exchange(context.Background(), code)
 		if err != nil {
@@ -164,7 +164,7 @@ func GitHubCallbackHandler(logger *logrus.Logger, service *auth.AuthService, all
 			newUser := &auth.User{
 				Email:    strings.ToLower(strings.TrimSpace(ghUser.Email)),
 				Name:     ghUserName,
-				Password: fmt.Sprintf("github-oauth-%d", ghUser.ID),
+				Password: randomPassword(),
 				Role:     "viewer",
 			}
 			if err := service.Register(newUser); err != nil {
@@ -189,39 +189,22 @@ func GitHubCallbackHandler(logger *logrus.Logger, service *auth.AuthService, all
 			return
 		}
 
-		// If a frontend redirect URL is configured, redirect the browser instead of returning JSON
 		frontendURL := os.Getenv("FRONTEND_REDIRECT_URL")
 		if frontendURL == "" {
 			frontendURL = "http://localhost:3000"
 		}
-		if frontendURL != "" {
-			redirectURL := fmt.Sprintf("%s?access_token=%s&refresh_token=%s&edition=%s&github_token=%s&user_id=%s&user_name=%s&user_email=%s&user_role=%s",
-				strings.TrimRight(frontendURL, "/")+"/oauth/callback",
-				accessToken,
-				refreshToken,
-				edition,
-				token.AccessToken,
-				existingUser.ID,
-				url.QueryEscape(existingUser.Name),
-				url.QueryEscape(existingUser.Email),
-				existingUser.Role,
-			)
-			c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-			return
-		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"access_token":  accessToken,
-			"refresh_token": refreshToken,
-			"user": authUserResponse{
-				ID:    existingUser.ID,
-				Name:  existingUser.Name,
-				Email: existingUser.Email,
-				Role:  existingUser.Role,
-			},
-			"github_token": token.AccessToken,
-			"edition":      edition,
-		})
+		// Use secure short-lived cookie instead of URL params for tokens
+		redirectURL := fmt.Sprintf("%s/oauth/callback", strings.TrimRight(frontendURL, "/"))
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie("cbom_access_token", accessToken, 3600, "/", "", false, true)
+		c.SetCookie("cbom_refresh_token", refreshToken, 86400*30, "/", "", false, true)
+		c.SetCookie("cbom_edition", edition, 86400, "/", "", false, true)
+		c.SetCookie("cbom_user_id", existingUser.ID, 86400, "/", "", false, true)
+		c.SetCookie("cbom_user_name", existingUser.Name, 86400, "/", "", false, true)
+		c.SetCookie("cbom_user_email", existingUser.Email, 86400, "/", "", false, true)
+		c.SetCookie("cbom_user_role", existingUser.Role, 86400, "/", "", false, true)
+		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 	}
 }
 

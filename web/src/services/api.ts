@@ -110,6 +110,8 @@ export const authService = {
 
   editions: () => api.get('/auth/editions'),
 
+  logout: () => api.post('/auth/logout'),
+
   googleLogin: () => api.get('/auth/google/login'),
 
   googleStatus: () => api.get('/auth/google/status'),

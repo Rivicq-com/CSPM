@@ -20,9 +20,14 @@ import (
 // SetupRoutes configures Enterprise API routes with IBMQ integration
 func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger, cfg *config.EnterpriseConfig) {
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	var enterpriseAuth gin.HandlerFunc = func(c *gin.Context) { c.Next() } // no-op fallback
+
 	if jwtSecret != "" {
-		if store, err := auth.NewWorkDomainUserStore(); err == nil {
-			shared.SetupAuthRoutes(router, logger, auth.NewAuthService(jwtSecret, store), allowedDomainsFromEnv(), jwtSecret)
+		store, err := auth.NewWorkDomainUserStore()
+		if err == nil {
+			authSvc := auth.NewAuthService(jwtSecret, store)
+			shared.SetupAuthRoutes(router, logger, authSvc, allowedDomainsFromEnv(), jwtSecret)
+			enterpriseAuth = authSvc.JWTAuthMiddleware(nil)
 		} else {
 			logger.WithError(err).Warn("enterprise auth routes disabled")
 		}
@@ -63,13 +68,6 @@ func SetupRoutes(router *gin.RouterGroup, db *database.DB, logger *logrus.Logger
 	quantumHandler.SetupRoutes(router)
 
 	// Enterprise feature routes with auth middleware
-	var enterpriseAuth gin.HandlerFunc = func(c *gin.Context) { c.Next() } // no-op fallback
-	if jwtSecret != "" {
-		if store, err := auth.NewWorkDomainUserStore(); err == nil {
-			authSvc := auth.NewAuthService(jwtSecret, store)
-			enterpriseAuth = authSvc.JWTAuthMiddleware(nil)
-		}
-	}
 	apiKeyManager.SetupRoutes(router, enterpriseAuth)
 	webhookManager.SetupRoutes(router, enterpriseAuth)
 	auditViewer.SetupRoutes(router, enterpriseAuth)
