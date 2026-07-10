@@ -27,7 +27,7 @@ type authUserResponse struct {
 }
 
 // SetupAuthRoutes configures shared JWT auth routes.
-func SetupAuthRoutes(router *gin.RouterGroup, logger *logrus.Logger, service *auth.AuthService, allowedDomains []string) {
+func SetupAuthRoutes(router *gin.RouterGroup, logger *logrus.Logger, service *auth.AuthService, allowedDomains []string, jwtSecret string) {
 	authGroup := router.Group("/auth")
 	{
 		authGroup.POST("/login", loginHandler(logger, service, allowedDomains))
@@ -49,18 +49,20 @@ func SetupAuthRoutes(router *gin.RouterGroup, logger *logrus.Logger, service *au
 		authGroup.GET("/github/status", GitHubOAuthStatusHandler(logger))
 
 		// Demo access
-		authGroup.GET("/demo", DemoAccessHandler(logger))
+		authGroup.GET("/demo", DemoAccessHandler(logger, jwtSecret))
 	}
 }
 
-func DemoAccessHandler(logger *logrus.Logger) gin.HandlerFunc {
+func DemoAccessHandler(logger *logrus.Logger, jwtSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		edition := c.DefaultQuery("edition", "oss")
 		if edition != "oss" && edition != "enterprise" {
 			edition = "oss"
 		}
 
-		jwtSecret := "demo-secret-key-not-for-production"
+		if jwtSecret == "" {
+			jwtSecret = "demo-secret-key-not-for-production"
+		}
 
 		now := time.Now()
 		claims := jwt.MapClaims{

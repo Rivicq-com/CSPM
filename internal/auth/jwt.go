@@ -30,6 +30,10 @@ type User struct {
 	Name           string `json:"name"`
 	Role           string `json:"role"`
 	Password       string `json:"-"`
+	Company        string `json:"company"`
+	AvatarURL      string `json:"avatar_url"`
+	Products       string `json:"products"`
+	GitHubID       string `json:"github_id"`
 	MFAEnabled     bool   `json:"mfa_enabled"`
 	MFASecret      string `json:"-"`
 }

@@ -152,13 +152,59 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 
 	var userStore auth.UserStore
 
-	// Use DatabaseUserStore when PostgreSQL is connected, fall back to in-memory
-	if db != nil && db.DB != nil {
+	// Priority 1: Shared SQLite database (unified auth with Website)
+	if dbPath := strings.TrimSpace(os.Getenv("AUTH_DB_PATH")); dbPath != "" {
+		sqliteStore, err := auth.NewSqliteUserStore(dbPath)
+		if err == nil {
+			userStore = sqliteStore
+			logger.WithField("path", dbPath).Info("Auth using shared SQLite user store")
+
+			// Bootstrap tenant if needed
+			bootstrapEmail := strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_EMAIL"))
+			if bootstrapEmail == "" {
+				bootstrapEmail = "admin@rivicq.local"
+			}
+			bootstrapPassword := strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_PASSWORD"))
+			if bootstrapPassword == "" {
+				bootstrapPassword = "admin12345!"
+			}
+			bootstrapName := strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_NAME"))
+			if bootstrapName == "" {
+				bootstrapName = "OSS Admin"
+			}
+			bootstrapRole := strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_ROLE"))
+			if bootstrapRole == "" {
+				bootstrapRole = "admin"
+			}
+
+			// Check if bootstrap user exists, create if not
+			_, lookupErr := sqliteStore.GetUserByEmail(bootstrapEmail)
+			if lookupErr != nil {
+				user := &auth.User{
+					ID:       "bootstrap-user",
+					TenantID: "tenant-1",
+					Email:    bootstrapEmail,
+					Name:     bootstrapName,
+					Role:     bootstrapRole,
+					Password: bootstrapPassword,
+				}
+				if createErr := sqliteStore.CreateUser(user); createErr != nil {
+					logger.WithError(createErr).Warn("Failed to create bootstrap admin in SQLite")
+				} else {
+					logger.WithField("email", bootstrapEmail).Info("Bootstrap admin user created in shared SQLite")
+				}
+			}
+		} else {
+			logger.WithError(err).Warn("Failed to open shared SQLite DB, trying PostgreSQL")
+		}
+	}
+
+	// Priority 2: Use DatabaseUserStore when PostgreSQL is connected, fall back to in-memory
+	if userStore == nil && db != nil && db.DB != nil {
 		store := auth.NewDatabaseUserStore(db.DB)
 		userStore = store
 		logger.Info("Auth using PostgreSQL database user store")
 
-		// Create default organization and bootstrap admin user
 		bootstrapEmail := strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_EMAIL"))
 		if bootstrapEmail == "" {
 			bootstrapEmail = "admin@rivicq.local"
@@ -176,7 +222,6 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 			bootstrapRole = "admin"
 		}
 
-		// Ensure default tenant exists
 		var tenantCount int
 		err := db.DB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
 		if err == nil && tenantCount == 0 {
@@ -187,7 +232,6 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 			}
 		}
 
-		// Create bootstrap admin user if no users exist
 		var userCount int
 		err = db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&userCount)
 		if err == nil && userCount == 0 {
@@ -204,7 +248,10 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 				}
 			}
 		}
-	} else {
+	}
+
+	// Priority 3: In-memory fallback
+	if userStore == nil {
 		store, err := auth.NewWorkDomainUserStore()
 		if err == nil {
 			userStore = store
@@ -220,7 +267,7 @@ func setupOSSAuth(router *gin.RouterGroup, db *database.DB, logger *logrus.Logge
 	if len(allowedDomains) == 0 {
 		logger.Info("OSS registration is open to any email domain unless AUTH_ALLOWED_DOMAINS is set")
 	}
-	shared.SetupAuthRoutes(router, logger, authService, allowedDomains)
+	shared.SetupAuthRoutes(router, logger, authService, allowedDomains, jwtSecret)
 }
 
 func attestCBOMReportOSS(db *database.DB, logger *logrus.Logger) gin.HandlerFunc {
